@@ -1,5 +1,17 @@
 ngx_addon_name=ngx_http_ipset_blacklist
-HTTP_MODULES="$HTTP_MODULES ngx_http_ipset_blacklist"
 
-NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_ipset_blacklist.c"
-NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ipset_read.c"
+# https://lipanski.com/posts/nginx-dynamic-modules
+
+if test -n "$ngx_module_link"; then
+    ngx_module_type=HTTP
+    ngx_module_name=ngx_http_ipset_blacklist
+    ngx_module_srcs="$ngx_addon_dir/ngx_http_ipset_blacklist.c $ngx_addon_dir/ipset_test.c $ngx_addon_dir/ipset_test_rpc_xdr.c $ngx_addon_dir/ipset_test_rpc_clnt.c"
+    . auto/module
+else
+    HTTP_MODULES="$HTTP_MODULES ngx_http_ipset_blacklist"
+
+    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_ipset_blacklist.c"
+    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ipset_test.c"
+    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ipset_test_rpc_xdr.c"
+    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ipset_test_rpc_clnt.c"
+fi

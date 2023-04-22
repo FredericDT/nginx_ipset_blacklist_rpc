@@ -6,13 +6,12 @@ In comparison to standard nginx access module this allows for dynamic list updat
 == Installation
 
 * Get youself a linux server with root access
-* Install ipset 4.4 (see http://ipset.netfilter.org/install.html)
+* Install ipset 7.17 (see http://ipset.netfilter.org/install.html)
 * Get nginx source code, unpack etc.
 * Install libssl-dev, pcre and other nginx requirements
 * Configure nginx with this module:
-    ./configure --with-module=/path/to/nginx_ipset_blacklist
+    ./configure --add-dynamic-module=/path/to/nginx_ipset_blacklist
 * Compile, install
-* Configure nginx to run workers as root (this is needed to allow access to ipsets)
 * Create yout ipset and add some 'offending' ips to it:
     sudo ipset -N myblacklist iphash
     sudo ipset -A myblacklist 127.0.0.1
@@ -21,7 +20,6 @@ In comparison to standard nginx access module this allows for dynamic list updat
 
 == Usage
 Sample nginx config:
-    user root;
     worker_processes  1;
     
     events {
@@ -29,7 +27,7 @@ Sample nginx config:
     }
     
     http {
-      blacklist "myblacklist";
+      blacklist "myblacklist" "myblacklist6";
       include       mime.types;
       default_type  application/octet-stream;
       
@@ -38,7 +36,7 @@ Sample nginx config:
       }
       
       server {
-        whitelist "my_whitelist"; # this server will not use global blacklist, but instad use local whitelist
+        whitelist "my_whitelist" "my_whitelist6"; # this server will not use global blacklist, but instad use local whitelist
         ...
       }
     }

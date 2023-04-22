@@ -17,7 +17,9 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "ipset_read.h"
+#include <sys/socket.h>
+
+#include "ipset_test.h"
 
 
 
@@ -34,7 +36,7 @@ static ngx_command_t  ngx_http_ipset_access_commands[] = {
 
     { ngx_string("blacklist"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF // configurable per virtual server
-      | NGX_CONF_TAKE1,
+      | NGX_CONF_TAKE2,
       ngx_http_ipset_access_list_conf,
       NGX_HTTP_SRV_CONF_OFFSET,
       0,
@@ -42,7 +44,7 @@ static ngx_command_t  ngx_http_ipset_access_commands[] = {
 
     { ngx_string("whitelist"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF 
-      | NGX_CONF_TAKE1,
+      | NGX_CONF_TAKE2,
       ngx_http_ipset_access_list_conf,
       NGX_HTTP_SRV_CONF_OFFSET,
       0,
@@ -93,7 +95,8 @@ typedef struct {
     e_mode_blacklist,
     e_mode_whitelist
     } mode;
-  ipset_handle_t ipset_handle;
+  char setname4[32];
+  char setname6[32];
 } ngx_http_ipset_access_server_conf_t;
 
 
@@ -116,7 +119,8 @@ static char* ngx_http_ipset_access_merge_srv_conf(ngx_conf_t *cf, void *parent, 
 
     if (!conf->mode) {
         conf->mode = prev->mode;
-        conf->ipset_handle = prev->ipset_handle;
+        strncpy(conf->setname4, prev->setname4, IP_SET_MAXNAMELEN);
+        strncpy(conf->setname6, prev->setname6, IP_SET_MAXNAMELEN);
     }
 
     return NGX_CONF_OK;
@@ -132,31 +136,11 @@ static char* ngx_http_ipset_access_list_conf(ngx_conf_t *cf, ngx_command_t *cmd,
       conf->mode = e_mode_off;
       return NGX_CONF_OK;
     }
-
-    //get ipset handle from kernel:
-    char* strerr = "no error returned";
-    conf->ipset_handle = ipset_read_get_handle(value[1].data, &strerr);
-    if(conf->ipset_handle == -1){
-      ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "cannot get ipset \"%V\" from kernel, check nginx to be running as root (%s)", &value[1], strerr);
-      return NGX_CONF_ERROR;      
-    }
     
     //check if cmd was 'whitelist' or 'blacklist'
     conf->mode = value[0].data[0] == 'b' ? e_mode_blacklist : e_mode_whitelist;
-
-    //perform a test read:
-    struct sockaddr_in addr;
-    int res = IPS_FAIL;
-    char* err = "cannot convert test ip to int";
-  	if (inet_aton("127.0.0.1", &addr.sin_addr)) {
-      err = "no err returned";
-      res = ipset_read_check_ip(conf->ipset_handle, (struct sockaddr_in *)&addr, &err);      
-  	}  
-
-    if(res == IPS_FAIL){
-      ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "failed to test read ipset \"%V\", check nginx to be running all processes as root: %s", &value[1], err);
-      return NGX_CONF_ERROR;
-    }
+    strncpy(conf->setname4, (char *) value[1].data, IP_SET_MAXNAMELEN);
+    strncpy(conf->setname6, (char *) value[2].data, IP_SET_MAXNAMELEN);
 
     return NGX_CONF_OK;
 }
@@ -164,57 +148,38 @@ static char* ngx_http_ipset_access_list_conf(ngx_conf_t *cf, ngx_command_t *cmd,
 //-------------------------------------------------------------------------------------------------------------
 static ngx_int_t ngx_http_ipset_on_init_process(ngx_cycle_t *cycle){  
   
-  if(geteuid() != 0) {
-    ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "To run ipsets all worker threads need to be run as root (check config)");
+  if (init_ipset_test_clnt()) {
     return NGX_ERROR;
   }
-  
-  if(1){
-    //do we need re-init?
-    return NGX_OK;
-  }
-  
-  char* err = "no err returned";
-  if(!ipset_read_init(&err)){
-    ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "cannot init ipset client: %s", err);
-    return NGX_ERROR;
-  }
+
   return NGX_OK;
 }
 
 static ngx_int_t ngx_http_ipset_access_handler(ngx_http_request_t *r)
 {
-    ngx_http_ipset_access_server_conf_t  *conf = ngx_http_get_module_srv_conf(r, ngx_http_ipset_blacklist);
+  ngx_http_ipset_access_server_conf_t  *conf = ngx_http_get_module_srv_conf(r, ngx_http_ipset_blacklist);
+  if (conf->mode != e_mode_not_configured) {
+    int res;
+    res = test_ipaddr_in_ipset(
+      r->connection->sockaddr->sa_family == AF_INET ? conf->setname4 : conf->setname6, 
+      r->connection->sockaddr->sa_family, r->connection->sockaddr
+    );
 
-    if (r->connection->sockaddr->sa_family == AF_INET) {
-      char* err = "no err returned";
-      int res = ipset_read_check_ip(conf->ipset_handle, (struct sockaddr_in*) r->connection->sockaddr, &err);
-
-      if(res == IPS_FAIL){
-        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0, "failed to read white/blacklist: %s", err);
-      }
-      
-      
-      if((conf->mode == e_mode_whitelist && (res == IPS_NOT_IN_SET || res == IPS_FAIL)) ||
-         (conf->mode == e_mode_blacklist && res == IPS_IN_SET)){
-        
-        r->keepalive = 0;
-
-        //return a non-standard status when blacklisting
-        if(conf->mode == e_mode_blacklist)
-          return 444;
-        return NGX_HTTP_FORBIDDEN;        
-      }
-
-      return NGX_OK;  
+    if(res == 1){
+      ngx_log_error(NGX_LOG_WARN, r->connection->log, 0, "failed to read white/blacklist");
     }
+    // fprintf(stderr, "ipset res = %d\n", res);
+    
+    if((conf->mode == e_mode_whitelist && res == IPADDR_NOT_IN_IPSET) ||
+        (conf->mode == e_mode_blacklist && res == IPADDR_IN_IPSET)) {
+      r->keepalive = 0;
+      return NGX_HTTP_FORBIDDEN;
+    } else {
+      return NGX_OK;
+    }
+  }
 
-    #if (NGX_HAVE_INET6)
-      //FIXME: IPv6 support? ipsets do not seem to support it
-      #warning IPv6 is not supported by ipset_module, IPv6 requests will not be filtered
-    #endif
-
-    return NGX_DECLINED; // we have nothing to do with this request => pass to next handler
+  return NGX_DECLINED; // we have nothing to do with this request => pass to next handler
 }
 
 
@@ -224,13 +189,8 @@ static ngx_int_t ngx_http_ipset_access_handler(ngx_http_request_t *r)
 static ngx_int_t ngx_http_ipset_access_init(ngx_conf_t *cf)
 {
     //check conf:
-    ngx_core_conf_t* ccf;
-    ccf = (ngx_core_conf_t *) NULL; //ngx_get_conf(???, ngx_core_module);
-    if(geteuid() != 0 || (ccf && (ccf->user == (uid_t) NGX_CONF_UNSET_UINT || ccf->user != 0))){
-      ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "To run ipsets all worker threads need to be run as root (add 'user root' to core config, current is %d)", ccf->user);
-      return NGX_ERROR; 
-    }
-  
+    // ngx_core_conf_t* ccf;
+    // ccf = (ngx_core_conf_t *) NULL; //ngx_get_conf(???, ngx_core_module);
 
     //install handler
     ngx_http_handler_pt        *h;
